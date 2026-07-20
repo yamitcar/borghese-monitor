@@ -404,6 +404,19 @@ def gyg_collect_slot_chips(page, out, date_iso):
 
 
 def gyg_check_date(pw, date_iso, party_size):
+    """Retry wrapper: GYG intermittently serves challenges/variants to
+    datacenter IPs — a fresh page usually recovers."""
+    last_err = None
+    for attempt in (1, 2):
+        try:
+            return _gyg_check_date_once(pw, date_iso, party_size)
+        except Exception as e:
+            last_err = e
+            log(f"GYG attempt {attempt} failed: {str(e)[:150]}")
+    raise last_err
+
+
+def _gyg_check_date_once(pw, date_iso, party_size):
     """Drive the GYG product page for a specific date and party size.
 
     Loads the page WITHOUT date_from (an out-of-horizon date_from 404s the
@@ -434,7 +447,13 @@ def gyg_check_date(pw, date_iso, party_size):
         out = {"date_selectable": None, "chips": [], "spots_badges": []}
 
         # 1) find the target day in the date picker
-        page.locator("button.gtm-trigger__adp-date-picker-interaction").first.click(timeout=8000)
+        picker = page.locator("button.gtm-trigger__adp-date-picker-interaction")
+        try:
+            picker.first.wait_for(state="attached", timeout=15000)
+        except Exception:
+            raise RuntimeError(f"GYG booking widget missing (title={page.title()!r}) — "
+                               f"challenge page or layout variant")
+        picker.first.click(timeout=8000)
         page.wait_for_selector(".c-datepicker-day__container", timeout=10000)
         target_dt = datetime.date.fromisoformat(date_iso)
         # aria-label like "Friday, September 25, 2026"
