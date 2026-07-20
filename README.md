@@ -28,8 +28,16 @@ La documentación completa vive en comentarios al inicio de
   devuelve un "product" por cada día del museo a la venta, con `startDate` y
   `productId`. **Que el 25-09 aparezca en esa lista = la fecha está liberada.**
   Se usa la API porque el HTML de tosc.it está detrás de Akamai Bot Manager,
-  que responde `Access Denied` a navegadores headless (comprobado); la API, en
-  cambio, respondió sin cookies ni fingerprint especial.
+  que responde `Access Denied` a navegadores headless de forma intermitente;
+  la API respondió sin cookies ni fingerprint especial desde IPs residenciales.
+  **Descubierto en la primera corrida en Actions:** la API devuelve `403` a las
+  IPs de datacenter de GitHub, así que el monitor intenta en cadena:
+  1) API por `urllib`, 2) la misma URL abierta dentro de Chromium headless,
+  3) el DOM de la página del artista (lista de eventos + calendario mensual:
+  `#calendar-month`, `[data-qa="calendar-go-next"]`, celdas `.cal-month-day`
+  con clase `with-event` y estados `cal-event-status-available/unavailable`).
+  Si las tres capas fallan, el Issue/logs lo dicen explícitamente y GYG sigue
+  cubriendo la vigilancia.
 - **DOM de la página del día** (`/en/event/galleria-borghese-galleria-borghese-<productId>/`),
   mejor esfuerzo para el detalle por turno:
   - una tarjeta por turno: `div[data-qa="price-category"]`, con el título del turno

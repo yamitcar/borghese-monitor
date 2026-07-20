@@ -27,9 +27,12 @@ tosc.it — two layers:
         product["productId"]  -> 21872491 (day event page id)
         product["status"]     -> "Available" for every released day (not granular)
       A day being PRESENT in this list == the date has been released for sale.
-      This is the primary CI-safe signal: tosc.it's HTML is behind Akamai bot
-      protection which returns "Access Denied" to headless browsers, but this
-      API answered plain curl without any cookies.
+      CAVEAT (first CI run, 2026-07-20): the API answers plain curl from
+      residential IPs but returns 403 Forbidden to GitHub Actions runners,
+      so the monitor tries in order:
+        1. urllib with browser-ish headers,
+        2. the same URL opened inside headless Chromium (page.goto),
+        3. the artist-page DOM (see below).
 
   (b) tosc.it DOM (works in a headed browser; headless usually gets Akamai
       "Access Denied" — kept as best-effort enrichment):
@@ -47,10 +50,21 @@ tosc.it — two layers:
               hidden inputs input.js-stepper-amount
           => "slot available" == card contains a .js-stepper, not text matching.
       Artist page /en/artist/galleria-borghese/galleria-borghese-2253937/:
-        - article[data-qa="event-listing-item"] per day, date in
-          time[data-qa="event-date-day"] @datetime (ISO), availability pill
+        - event list: article[data-qa="event-listing-item"] per day, date in
+          time[data-qa="event-date-day"] @datetime (ISO), day event id on the
+          date box div[data-qa="event-date"] @data-event-id, availability pill
           div[data-qa^="pill-available"] ("Available"/"Limited"/"Few" =
-          availability-indicator-{green,yellow,red}).
+          availability-indicator-{green,yellow,red}). NOTE: the list paginates
+          (20 of 36 rows server-rendered), so absence from the list is NOT
+          absence from sale — the month calendar is the authority:
+        - calendar: [data-qa="calendar-component"], current month label
+          #calendar-month ("July 2026"), nav buttons
+          [data-qa="calendar-go-next"] / [data-qa="calendar-go-previous"]
+          (disabled attr at the range edges), day cells .cal-month-day
+          (.cal-day-inmonth for days of the shown month, "with-event" class on
+          days that have an event), day number in .day-number, and per-day
+          status either on .day-number or on .event-time-pill chips via
+          cal-event-status-available / cal-event-status-unavailable.
 
 GetYourGuide — headless-friendly (with a non-headless user agent):
 
@@ -140,12 +154,7 @@ def is_afternoon(hhmm):
 
 # ----------------------------- source 1: tosc.it -----------------------------
 
-def tosc_api_released_days():
-    """Days currently on sale according to the Eventim public API."""
-    url = EVENTIM_API.format(pg=TOSC_PRODUCT_GROUP_ID)
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.load(resp)
+def _parse_api_days(data):
     days = {}
     for prod in data.get("products", []):
         start = (prod.get("typeAttributes", {}).get("liveEntertainment", {}) or {}).get("startDate", "")
@@ -155,6 +164,135 @@ def tosc_api_released_days():
                 "status": prod.get("status"),
             }
     return days
+
+
+def tosc_api_released_days():
+    """Days currently on sale according to the Eventim public API (urllib)."""
+    url = EVENTIM_API.format(pg=TOSC_PRODUCT_GROUP_ID)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": "https://www.tosc.it",
+        "Referer": "https://www.tosc.it/",
+    })
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return _parse_api_days(json.load(resp))
+
+
+def tosc_api_days_via_browser(pw):
+    """Same API but fetched from inside headless Chromium (real browser TLS).
+
+    The API 403s plain HTTP clients on datacenter IPs (seen from GitHub
+    Actions); going through the browser sometimes passes that filter.
+    """
+    url = EVENTIM_API.format(pg=TOSC_PRODUCT_GROUP_ID)
+    browser = pw.chromium.launch(headless=True, channel="chromium")
+    try:
+        ctx = browser.new_context(user_agent=USER_AGENT, locale="en-US")
+        page = ctx.new_page()
+        page.goto(url, timeout=45000, wait_until="domcontentloaded")
+        body = page.evaluate("document.body.innerText")
+        return _parse_api_days(json.loads(body))
+    finally:
+        browser.close()
+
+
+def tosc_artist_dom_days(pw):
+    """Last-resort official source: scrape the artist page itself.
+
+    Returns (days, target_released) where days comes from the server-rendered
+    event list (paginated, so possibly partial) and target_released is the
+    verdict of walking the month calendar to TARGET_DATE (None if the
+    calendar could not answer).
+    """
+    target_dt = datetime.date.fromisoformat(TARGET_DATE)
+    browser = pw.chromium.launch(headless=True, channel="chromium")
+    try:
+        ctx = browser.new_context(user_agent=USER_AGENT, locale="en-US",
+                                  viewport={"width": 1440, "height": 1200})
+        page = ctx.new_page()
+        for attempt in (1, 2):  # Akamai lets headless through intermittently
+            page.goto(TOSC_ARTIST_URL, timeout=45000, wait_until="domcontentloaded")
+            title = page.title() or ""
+            if "access denied" in title.lower():
+                raise RuntimeError("tosc.it artist page served 'Access Denied' (Akamai)")
+            try:
+                page.wait_for_selector(
+                    "[data-qa='calendar-component'], article[data-qa='event-listing-item']",
+                    timeout=20000, state="attached")
+                break
+            except Exception:
+                log(f"tosc.it artist DOM attempt {attempt}: no calendar/list rendered "
+                    f"(title={title!r}, body={len(page.content())} bytes)")
+                if attempt == 2:
+                    raise RuntimeError("artist page loaded but calendar/list never rendered "
+                                       "(soft bot-block or markup change)")
+        try:  # cookie banner ("Accept All Cookies") can overlay the calendar nav
+            page.locator("button:has-text('Accept All Cookies')").first.click(timeout=3000)
+        except Exception:
+            pass
+
+        days = {}
+        for art in page.locator("article[data-qa='event-listing-item']").all():
+            t = art.locator("time[data-qa='event-date-day']").first
+            if t.count() == 0:
+                continue
+            iso = (t.get_attribute("datetime") or "")[:10]
+            if not iso:
+                continue
+            box = art.locator("[data-qa='event-date']").first
+            pid = box.get_attribute("data-event-id") if box.count() else None
+            pill = art.locator("[data-qa^='pill-available']").first
+            status = pill.inner_text().strip() if pill.count() else "listed"
+            days[iso] = {"productId": pid, "status": status}
+        log(f"tosc.it artist DOM: {len(days)} days in the (paginated) event list")
+
+        # walk the calendar to the target month
+        target_released = None
+        month_label = f"{target_dt.strftime('%B')} {target_dt.year}"
+        for _ in range(14):
+            current = page.locator("#calendar-month").first.inner_text().strip()
+            if current == month_label:
+                break
+            nxt = page.locator("[data-qa='calendar-go-next']").first
+            if nxt.count() == 0 or nxt.get_attribute("disabled") is not None:
+                log(f"tosc.it calendar: cannot advance past {current!r} — "
+                    f"{month_label!r} not published yet")
+                return days, False
+            nxt.click(timeout=4000)
+            page.wait_for_timeout(700)
+        else:
+            return days, None
+        # found the month: inspect the day cell
+        for cell in page.locator(".cal-month-day.cal-day-inmonth").all():
+            num = cell.locator(".day-number").first
+            if num.count() and num.inner_text().strip() == str(target_dt.day):
+                classes = cell.get_attribute("class") or ""
+                has_event = "with-event" in classes or cell.locator(".event-time-pill").count() > 0
+                available = cell.locator(".cal-event-status-available").count() > 0
+                log(f"tosc.it calendar {TARGET_DATE}: with_event={has_event} "
+                    f"available_marker={available}")
+                # over-alert: any event on the day counts as released
+                target_released = has_event
+                break
+        return days, target_released
+    finally:
+        browser.close()
+
+
+def get_tosc_days(pw):
+    """Layered official-source lookup. Returns (days, how, target_released_hint)."""
+    try:
+        return tosc_api_released_days(), "api", None
+    except Exception as e:
+        log(f"tosc.it API via urllib failed ({e}); trying through the browser")
+    try:
+        return tosc_api_days_via_browser(pw), "api-browser", None
+    except Exception as e:
+        log(f"tosc.it API via browser failed ({str(e)[:150]}); trying artist page DOM")
+    days, target_released = tosc_artist_dom_days(pw)
+    return days, "artist-dom", target_released
 
 
 def tosc_dom_slots(pw, product_id):
@@ -190,30 +328,42 @@ def tosc_dom_slots(pw, product_id):
 def check_tosc(pw):
     result = {"source": "tosc.it (oficial)", "link": TOSC_ARTIST_URL,
               "date_released": False, "slots": None, "notes": []}
-    days = tosc_api_released_days()
+    days, how, target_hint = get_tosc_days(pw)
     if days:
         first, last = min(days), max(days)
-        log(f"tosc.it API: {len(days)} days on sale ({first} .. {last})")
-    else:
-        log("tosc.it API: returned no days — treating as source error")
-        raise RuntimeError("Eventim API returned an empty product list")
+        log(f"tosc.it [{how}]: {len(days)} days on sale ({first} .. {last})")
+    elif target_hint is None:
+        log(f"tosc.it [{how}]: returned no days — treating as source error")
+        raise RuntimeError("official source returned an empty day list")
 
+    if target_hint:
+        # calendar fallback says the day exists even though the (paginated)
+        # list didn't include it
+        result["date_released"] = True
+        result["notes"].append("Detectado vía calendario de tosc.it (sin detalle de turnos).")
+        log(f"tosc.it: TARGET DATE {TARGET_DATE} present in the artist calendar")
+        result["days_seen"] = days
+        return result
+
+    result["days_seen"] = days
     if TARGET_DATE not in days:
+        last = max(days) if days else "ninguno visible"
         result["notes"].append(f"La fecha {TARGET_DATE} aún no aparece en la venta oficial "
-                               f"(último día liberado: {max(days)}).")
+                               f"(último día liberado: {last}).")
         # Selector self-test on a date that IS on sale, so we know the slot
         # detection would work the day the target date appears.
-        probe = min(days)
-        log(f"tosc.it selftest: probing slot selectors on released day {probe} "
-            f"(productId {days[probe]['productId']})")
-        try:
-            slots = tosc_dom_slots(pw, days[probe]["productId"])
-            avail = [s for s in slots if s["available"]]
-            log(f"tosc.it selftest OK: {len(slots)} slot cards parsed, {len(avail)} available "
-                f"({[s['title'] for s in avail][:5]})")
-        except Exception as e:
-            log(f"tosc.it selftest: DOM not reachable ({e}) — expected in CI; "
-                f"date-level detection via API remains functional")
+        probe = min(days) if days else None
+        if probe and days[probe]["productId"]:
+            log(f"tosc.it selftest: probing slot selectors on released day {probe} "
+                f"(productId {days[probe]['productId']})")
+            try:
+                slots = tosc_dom_slots(pw, days[probe]["productId"])
+                avail = [s for s in slots if s["available"]]
+                log(f"tosc.it selftest OK: {len(slots)} slot cards parsed, {len(avail)} available "
+                    f"({[s['title'] for s in avail][:5]})")
+            except Exception as e:
+                log(f"tosc.it selftest: DOM not reachable ({e}) — expected in CI; "
+                    f"date-level detection remains functional")
         return result
 
     result["date_released"] = True
@@ -404,26 +554,29 @@ def main():
     from playwright.sync_api import sync_playwright
 
     results = []
+    failed_sources = []
     selftest_date = None
     with sync_playwright() as pw:
         try:
             r_tosc = check_tosc(pw)
             results.append(r_tosc)
+            days = r_tosc.get("days_seen") or {}
+            selftest_date = min(days) if days else None
         except Exception:
             log("tosc.it source failed:\n" + traceback.format_exc())
             results.append(None)
-        try:
-            days = tosc_api_released_days()
-            selftest_date = min(days) if days else None
-        except Exception:
-            selftest_date = None
+            failed_sources.append("tosc.it (oficial)")
         try:
             results.append(check_gyg(pw, selftest_date=selftest_date))
         except Exception:
             log("GetYourGuide source failed:\n" + traceback.format_exc())
             results.append(None)
+            failed_sources.append("GetYourGuide (respaldo)")
 
     alert, details = summarize(results)
+    if failed_sources:
+        details += ("\n⚠️ Fuentes que fallaron en esta corrida (revisa los logs): "
+                    + ", ".join(failed_sources) + "\n")
     if alert:
         header = (f"Fecha objetivo: {TARGET_DATE} — turnos deseados: "
                   f"{', '.join(TARGET_AFTERNOON_SLOTS)} — {PARTY_SIZE} personas\n"
