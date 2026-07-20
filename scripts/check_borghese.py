@@ -511,15 +511,22 @@ def check_gyg(pw, selftest_date=None):
         result["slots"] = chips
     else:
         result["notes"].append(f"GYG aún no ofrece {TARGET_DATE}.")
-        if selftest_date:
+        if probe["date_selectable"] is not None:
+            # the main probe already exercised the picker selectors end-to-end;
+            # a second visit tends to trip Cloudflare's "Just a moment..."
+            log("GYG selftest skipped: main probe already validated the selectors")
+        elif selftest_date:
             log(f"GYG selftest: probing a date that IS on sale officially: {selftest_date}")
-            st = gyg_check_date(pw, selftest_date, PARTY_SIZE)
-            if st["chips"] or st["date_selectable"]:
-                log(f"GYG selftest OK: date_selectable={st['date_selectable']} "
-                    f"chips={st['chips']}")
-            else:
-                log("GYG selftest WARNING: no availability signal for a day that the "
-                    "official site sells — GYG selectors may have changed")
+            try:
+                st = gyg_check_date(pw, selftest_date, PARTY_SIZE)
+                if st["chips"] or st["date_selectable"]:
+                    log(f"GYG selftest OK: date_selectable={st['date_selectable']} "
+                        f"chips={st['chips']}")
+                else:
+                    log("GYG selftest WARNING: no availability signal for a day that the "
+                        "official site sells — GYG selectors may have changed")
+            except Exception as e:
+                log(f"GYG selftest failed (does not affect the main result): {str(e)[:150]}")
     if probe["spots_badges"]:
         result["notes"].append("Aviso de escasez en GYG: " + "; ".join(probe["spots_badges"]))
     return result
