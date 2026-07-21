@@ -404,33 +404,44 @@ def gyg_collect_slot_chips(page, out, date_iso):
 
 
 def gyg_check_date(pw, date_iso, party_size):
-    """Retry wrapper: GYG intermittently serves challenges/variants to
-    datacenter IPs — a fresh page usually recovers."""
+    """Retry wrapper: GYG intermittently serves challenges/error variants to
+    datacenter IPs — a fresh page after a pause usually recovers."""
+    import time
     last_err = None
-    for attempt in (1, 2):
+    for attempt in (1, 2, 3):
         try:
             return _gyg_check_date_once(pw, date_iso, party_size)
         except Exception as e:
             last_err = e
             log(f"GYG attempt {attempt} failed: {str(e)[:150]}")
+            time.sleep(10 * attempt)  # back off before hitting them again
     raise last_err
 
 
 def _gyg_check_date_once(pw, date_iso, party_size):
     """Drive the GYG product page for a specific date and party size.
 
-    Loads the page WITHOUT date_from (an out-of-horizon date_from 404s the
-    whole page), decides via the date picker, and only if the day is enabled
-    clicks it to load the start-time options.
+    Loads the BARE product page: date_from with an out-of-horizon date 404s
+    the whole page, and the _pc participants param proved unnecessary for the
+    date-picker probe (one query param fewer for the bot filter to dislike).
+    Decides via the date picker, and only if the day is enabled clicks it to
+    load the start-time options.
     """
-    url = f"{GYG_URL}?_pc=1%2C{party_size}"
     browser = pw.chromium.launch(headless=True, channel="chromium")
     try:
         ctx = browser.new_context(user_agent=USER_AGENT, locale="en-US",
                                   viewport={"width": 1440, "height": 1400})
         page = ctx.new_page()
-        page.goto(url, timeout=60000, wait_until="domcontentloaded")
+        page.goto(GYG_URL, timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
+        title = page.title() or ""
+        if "error" in title.lower() or "access denied" in title.lower():
+            # generic "GetYourGuide – Error" page: often transient, one
+            # same-page reload tends to clear it
+            log(f"GYG: error page on first load ({title!r}), reloading once")
+            page.wait_for_timeout(5000)
+            page.reload(timeout=60000, wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
         # usercentrics cookie dialog overlays the booking widget
         for sel in ["button:has-text(\"Let's go\")", "button:has-text('Accept all')",
                     "#onetrust-accept-btn-handler"]:
