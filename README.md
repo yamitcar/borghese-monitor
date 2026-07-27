@@ -1,5 +1,7 @@
 # borghese-monitor
 
+[![Borghese ticket monitor](https://github.com/yamitcar/borghese-monitor/actions/workflows/monitor.yml/badge.svg)](https://github.com/yamitcar/borghese-monitor/actions/workflows/monitor.yml)
+
 Monitor automático de disponibilidad de entradas para la **Galleria Borghese** (Roma).
 Cada 3 horas, un GitHub Action comprueba si ya se venden entradas para el
 **25 de septiembre de 2026 por la tarde (15:00 o 17:00), 4 personas**, y si detecta
@@ -101,6 +103,20 @@ El título del Issue está en `.github/workflows/monitor.yml` (paso "Open alert 
 El script imprime `AVAILABLE` o `NOT_AVAILABLE` y siempre sale con código 0
 (un fallo de scraping no debe parecer disponibilidad). El workflow compara la
 línea exacta (`grep -qx`) porque `NOT_AVAILABLE` contiene `AVAILABLE`.
+
+## Cómo vigilar a diario que sigue vivo
+
+- **Badge de arriba**: verde = la última corrida terminó bien.
+- **[Lista de corridas](https://github.com/yamitcar/borghese-monitor/actions/workflows/monitor.yml)**:
+  una fila por ejecución (~8/día). Al abrir cualquiera, el **Summary** muestra el
+  resultado (`AVAILABLE`/`NOT_AVAILABLE`), la línea `SALUD FUENTES: oficial=... | GetYourGuide=...`
+  y el log completo plegado — sin tener que expandir pasos.
+- **Email**: GitHub te avisa por email si una corrida programada **falla** (ajuste
+  por defecto de notificaciones), y por supuesto al crearse el Issue de disponibilidad.
+- ⚠️ **Ojo**: GitHub desactiva los crons de repos sin actividad tras ~60 días
+  (avisa antes por email). Cualquier commit lo resetea; con la fecha objetivo en
+  septiembre no debería llegar a aplicar, pero si ves que dejan de aparecer
+  corridas, entra a *Actions* y reactiva el workflow.
 
 ## Mantenimiento: si tosc.it (o GYG) cambian su HTML
 

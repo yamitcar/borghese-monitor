@@ -614,6 +614,11 @@ def main():
     if failed_sources:
         details += ("\n⚠️ Fuentes que fallaron en esta corrida (revisa los logs): "
                     + ", ".join(failed_sources) + "\n")
+    # one-line health verdict per source, for the run summary / quick scanning
+    oficial_ok = results[0] is not None
+    gyg_ok = len(results) > 1 and results[1] is not None
+    log(f"SALUD FUENTES: oficial tosc.it={'OK' if oficial_ok else 'FALLO'} | "
+        f"GetYourGuide={'OK' if gyg_ok else 'FALLO'}")
     if alert:
         header = (f"Fecha objetivo: {TARGET_DATE} — turnos deseados: "
                   f"{', '.join(TARGET_AFTERNOON_SLOTS)} — {PARTY_SIZE} personas\n"

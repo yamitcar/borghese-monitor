@@ -39,9 +39,23 @@ jobs:
           # por eso el match es de línea exacta.
           if grep -qx 'AVAILABLE' check_output.txt; then
             echo "available=true" >> "$GITHUB_OUTPUT"
+            RESULT="🎟️ AVAILABLE — ¡revisa el Issue!"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
+            RESULT="😴 NOT_AVAILABLE"
           fi
+          # resumen visible en la página del run, sin abrir los logs
+          {
+            echo "## $RESULT"
+            grep 'SALUD FUENTES' check_output.txt || echo '⚠️ sin línea de salud (script interrumpido?)'
+            echo ""
+            echo "<details><summary>Log completo del chequeo</summary>"
+            echo ""
+            echo '```'
+            cat check_output.txt
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Open alert issue
         if: steps.check.outputs.available == 'true'
