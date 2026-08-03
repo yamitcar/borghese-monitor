@@ -1,14 +1,13 @@
 name: Borghese ticket monitor
 
 on:
-  schedule:
-    - cron: "0 */3 * * *"   # cada 3 horas (UTC)
+  # Monitor detenido el 2026-08-03: los turnos objetivo (15:00 y 17:00 del
+  # 2026-09-25) ya están a la venta en tosc.it, así que vigilarlos no aporta.
+  # Solo queda el disparo manual. Para reactivarlo, descomenta el schedule.
+  #
+  # schedule:
+  #   - cron: "0 */3 * * *"   # cada 3 horas (UTC)
   workflow_dispatch:
-  push:
-    # correr también cuando cambie el monitor, para validar selectores tras cada ajuste
-    paths:
-      - ".github/workflows/monitor.yml"
-      - "scripts/check_borghese.py"
 
 permissions:
   issues: write
